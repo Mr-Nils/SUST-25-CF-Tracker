@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { FullStudent } from "./types";
 import RegistrationForm from "./components/RegistrationForm";
 import Leaderboard from "./components/Leaderboard";
@@ -22,6 +22,51 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [selectedStudent, setSelectedStudent] = useState<FullStudent | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Creator state
+  const [isCreator, setIsCreator] = useState<boolean>(() => {
+    return localStorage.getItem("is_creator_mode") === "true";
+  });
+  const [showCreatorModal, setShowCreatorModal] = useState(false);
+  const [creatorInput, setCreatorInput] = useState("");
+  const [creatorError, setCreatorError] = useState<string | null>(null);
+
+  const handleCreatorToggle = () => {
+    if (isCreator) {
+      localStorage.removeItem("is_creator_mode");
+      localStorage.removeItem("creator_password");
+      setIsCreator(false);
+    } else {
+      setShowCreatorModal(true);
+    }
+  };
+
+  const handleVerifyCreator = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!creatorInput.trim()) {
+      setCreatorError("Please enter the Creator Password.");
+      return;
+    }
+    setCreatorError(null);
+    try {
+      const response = await fetch("/api/auth/verify-creator", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: creatorInput.trim() }),
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Access Denied: Invalid Creator Verification Code/Password.");
+      }
+      localStorage.setItem("is_creator_mode", "true");
+      localStorage.setItem("creator_password", creatorInput.trim());
+      setIsCreator(true);
+      setShowCreatorModal(false);
+      setCreatorInput("");
+    } catch (err: any) {
+      setCreatorError(err.message || "Access Denied: Invalid Creator Verification Code.");
+    }
+  };
 
   // Stats summaries
   const statsSummary = {
@@ -60,13 +105,23 @@ export default function App() {
 
   // Delete/unregister a student
   const handleDeleteStudent = async (handle: string) => {
+    if (!isCreator) {
+      alert("Operation Denied: Only certified Creator is allowed to remove user registrations.");
+      return;
+    }
+
     if (!confirm(`Are you sure you want to unregister CF handle "${handle}" from SUST 25 workspace database?`)) {
       return;
     }
 
+    const creatorPassword = localStorage.getItem("creator_password") || "";
+
     try {
       const response = await fetch(`/api/users/${handle}`, {
         method: "DELETE",
+        headers: {
+          "x-creator-password": creatorPassword
+        }
       });
 
       if (!response.ok) {
@@ -123,12 +178,22 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 font-mono">
+          <div className="flex items-center gap-3 font-mono">
             <span className="hidden sm:inline text-xs text-gray-500">SYSTEM status: </span>
             <span className="px-2 py-1 rounded bg-[#00ff87]/10 border border-[#00ff87]/30 text-[#00ff87] text-[10px] uppercase font-bold tracking-widest flex items-center gap-1">
               <span className="w-1.5 h-1.5 bg-[#00ff87] rounded-full animate-ping"></span>
               Live Online
             </span>
+            <button
+              onClick={handleCreatorToggle}
+              className={`px-3 py-1 text-xs font-bold rounded-md border tracking-wider transition-all duration-300 flex items-center gap-1.5 uppercase cursor-pointer ${
+                isCreator 
+                  ? "bg-red-500/10 border-red-500/50 text-red-400 hover:bg-red-500 hover:text-white"
+                  : "bg-cyber-cyan/10 border-cyber-cyan/30 text-cyber-cyan hover:bg-cyber-cyan hover:text-cyber-dark"
+              }`}
+            >
+              {isCreator ? "🔓 Creator Mode" : "🔒 Creator Login"}
+            </button>
           </div>
         </div>
       </header>
@@ -273,6 +338,7 @@ export default function App() {
                   isLoading={loading}
                   onSelectStudent={(student) => setSelectedStudent(student)}
                   onDeleteStudent={handleDeleteStudent}
+                  isCreator={isCreator}
                 />
               </div>
 
@@ -281,6 +347,60 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Creator Authentication Overlay Modal */}
+      {showCreatorModal && (
+        <div className="fixed inset-0 bg-cyber-dark/90 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in font-mono">
+          <div className="bg-cyber-panel border border-cyber-pink/50 rounded-xl p-6 max-w-sm w-full shadow-2xl relative">
+            <h3 className="text-sm font-bold text-cyber-pink uppercase tracking-widest mb-2 flex items-center gap-2">
+              <span>⚠</span> Creator Login Verification
+            </h3>
+            <p className="text-gray-400 mb-4 text-xs leading-relaxed">
+              This system protects the registered participant roster from unauthorized modifications. To verify that you are the creator (<strong className="text-white">Nilkontha Das</strong>), please enter your secure password:
+            </p>
+
+            <form onSubmit={handleVerifyCreator} className="space-y-4 text-xs">
+              <div>
+                <label className="text-[10px] text-gray-500 uppercase tracking-widest block mb-1.5">
+                  Creator Password
+                </label>
+                <input
+                  type="password"
+                  placeholder="••••••••••••"
+                  value={creatorInput}
+                  onChange={(e) => setCreatorInput(e.target.value)}
+                  className="w-full bg-cyber-dark text-white rounded-lg px-3 py-2 border border-gray-800 focus:border-cyber-pink focus:outline-none focus:ring-1 focus:ring-cyber-pink"
+                  autoFocus
+                />
+              </div>
+
+              {creatorError && (
+                <p className="text-red-400 font-semibold tracking-wider text-[11px]">{creatorError}</p>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCreatorModal(false);
+                    setCreatorInput("");
+                    setCreatorError(null);
+                  }}
+                  className="px-3 py-1.5 rounded border border-gray-800 text-gray-400 hover:text-white transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 rounded bg-cyber-pink text-white font-bold tracking-wide hover:bg-opacity-90 shadow-neon-pink transition-all cursor-pointer"
+                >
+                  Verify
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

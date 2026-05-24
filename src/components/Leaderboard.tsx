@@ -119,12 +119,13 @@ interface LeaderboardProps {
   isLoading: boolean;
   onSelectStudent: (student: FullStudent) => void;
   onDeleteStudent: (handle: string) => void;
+  isCreator: boolean;
 }
 
 type SortField = "rank" | "name" | "rating" | "regNo";
 type SortOrder = "asc" | "desc";
 
-export default function Leaderboard({ students, isLoading, onSelectStudent, onDeleteStudent }: LeaderboardProps) {
+export default function Leaderboard({ students, isLoading, onSelectStudent, onDeleteStudent, isCreator }: LeaderboardProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [sortField, setSortField] = useState<SortField>("rating");
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
@@ -347,13 +348,15 @@ export default function Leaderboard({ students, isLoading, onSelectStudent, onDe
                         >
                           Profile
                         </button>
-                        <button
-                          onClick={() => onDeleteStudent(student.handle)}
-                          className="p-1.5 rounded bg-red-950/20 border border-red-900/30 text-red-400 hover:bg-red-500 hover:text-white transition-all duration-200 cursor-pointer"
-                          title="Unregister Student"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {isCreator && (
+                          <button
+                            onClick={() => onDeleteStudent(student.handle)}
+                            className="p-1.5 rounded bg-red-950/20 border border-red-900/30 text-red-400 hover:bg-red-500 hover:text-white transition-all duration-200 cursor-pointer"
+                            title="Unregister Student"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

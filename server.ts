@@ -313,6 +313,13 @@ app.post("/api/users", async (req, res) => {
 app.delete("/api/users/:handle", (req, res) => {
   try {
     const { handle } = req.params;
+    const clientPassword = req.headers["x-creator-password"] as string || "";
+    const securePassword = process.env.CREATOR_PASSWORD || "202561201065";
+
+    if (clientPassword.trim() !== securePassword.trim()) {
+      return res.status(401).json({ error: "Unauthorized: Invalid or missing Creator verification code/password." });
+    }
+
     if (!fs.existsSync(STUDENTS_FILE)) {
       return res.status(404).json({ error: "No students dataset found." });
     }
@@ -378,6 +385,26 @@ app.get("/api/cf/user-profile/:handle", async (req, res) => {
   } catch (error: any) {
     console.error("[Individual Profile API Error]", error);
     res.status(500).json({ error: "Failed to retrieve student profile statistics.", details: error.message });
+  }
+});
+
+// 6. Verify Creator Password securely
+app.post("/api/auth/verify-creator", (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password) {
+      return res.status(400).json({ error: "Password is required" });
+    }
+
+    const securePassword = process.env.CREATOR_PASSWORD || "202561201065";
+    
+    if (password.trim() === securePassword.trim()) {
+      return res.json({ success: true });
+    } else {
+      return res.status(401).json({ error: "Access Denied: Invalid Creator Verification Code/Password." });
+    }
+  } catch (error: any) {
+    res.status(500).json({ error: "Failed to verify password", details: error.message });
   }
 });
 

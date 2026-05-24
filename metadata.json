@@ -1,0 +1,6 @@
+{
+  "name": "SUST 25 Codeforces Tracker",
+  "description": "A dark-themed leaderboard, solved problems tracker, and profile visualizer for the SUST Batch 25 Codeforces community.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

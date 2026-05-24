@@ -2,31 +2,83 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
+import { initializeApp } from "firebase/app";
+import { getFirestore, collection, getDocs, setDoc, doc, deleteDoc, getDoc, query, where } from "firebase/firestore";
 
 const PORT = 3000;
-const DATA_DIR = path.join(process.cwd(), "data");
-const STUDENTS_FILE = path.join(DATA_DIR, "students.json");
 
-// Ensure data directory and file exist with initial seed data
-function initData() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+// Initialize Firebase SDK
+const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
+const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf8"));
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
-  if (!fs.existsSync(STUDENTS_FILE)) {
-    const seedStudents = [
-      {
-        name: "Nilkontha Das (Creator)",
-        handle: "Nilkontha",
-        regNo: "202561201065",
-        addedAt: new Date().toISOString()
-      }
-    ];
-    fs.writeFileSync(STUDENTS_FILE, JSON.stringify(seedStudents, null, 2), "utf8");
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
   }
 }
 
-initData();
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: null,
+      email: null,
+      emailVerified: null,
+      isAnonymous: null,
+      tenantId: null,
+      providerInfo: []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+// Ensure database has initial seed data
+async function initData() {
+  try {
+    const studentsSnap = await getDocs(collection(db, "students"));
+    if (studentsSnap.empty) {
+      console.log("[Firebase init] Seeding default Creator student document...");
+      const creatorHandle = "Nilkontha";
+      const creatorDoc = {
+        name: "Nilkontha Das (Creator)",
+        handle: creatorHandle,
+        regNo: "202561201065",
+        addedAt: new Date().toISOString()
+      };
+      await setDoc(doc(db, "students", creatorHandle.toLowerCase()), creatorDoc);
+      console.log("[Firebase init] Seed successful!");
+    } else {
+      console.log("[Firebase init] Database contains records. Seeding skipped.");
+    }
+  } catch (err) {
+    console.error("[Firebase init Error] Failed to initialize/seed database:", err);
+  }
+}
 
 const app = express();
 app.use(express.json());
@@ -215,16 +267,20 @@ async function fetchCFUserSubmissions(handle: string) {
 }
 
 // 1. Get all registered students
-app.get("/api/users", (req, res) => {
+app.get("/api/users", async (req, res) => {
   try {
-    if (!fs.existsSync(STUDENTS_FILE)) {
-      return res.json([]);
-    }
-    const data = fs.readFileSync(STUDENTS_FILE, "utf8");
-    const students = JSON.parse(data);
+    const studentsSnap = await getDocs(collection(db, "students"));
+    const students: any[] = [];
+    studentsSnap.forEach((doc) => {
+      students.push(doc.data());
+    });
     res.json(students);
   } catch (error: any) {
-    res.status(500).json({ error: "Failed to read students list", details: error.message });
+    try {
+      handleFirestoreError(error, OperationType.GET, "students");
+    } catch (loggedErr: any) {
+      res.status(500).json({ error: "Failed to read students list", details: loggedErr.message });
+    }
   }
 });
 
@@ -268,20 +324,17 @@ app.post("/api/users", async (req, res) => {
     // Get verified handle capitalization representing real user
     const verifiedHandle = cfData.result[0].handle;
 
-    // Load existing
-    let students = [];
-    if (fs.existsSync(STUDENTS_FILE)) {
-      students = JSON.parse(fs.readFileSync(STUDENTS_FILE, "utf8"));
-    }
-
-    // Check duplicate handle or registration number
-    const isDuplicateHandle = students.some((s: any) => s.handle.toLowerCase() === verifiedHandle.toLowerCase());
-    const isDuplicateReg = students.some((s: any) => s.regNo.trim() === regNo.trim());
-
-    if (isDuplicateHandle) {
+    // Check duplicate handle
+    const studentDocRef = doc(db, "students", verifiedHandle.toLowerCase());
+    const studentDocSnap = await getDoc(studentDocRef);
+    if (studentDocSnap.exists()) {
       return res.status(400).json({ error: `Codeforces handle "${verifiedHandle}" is already registered.` });
     }
-    if (isDuplicateReg) {
+
+    // Check duplicate registration number
+    const regQuery = query(collection(db, "students"), where("regNo", "==", regNo.trim()));
+    const regQuerySnap = await getDocs(regQuery);
+    if (!regQuerySnap.empty) {
       return res.status(400).json({ error: `Registration number "${regNo}" is already registered.` });
     }
 
@@ -293,8 +346,11 @@ app.post("/api/users", async (req, res) => {
       addedAt: new Date().toISOString()
     };
 
-    students.push(newStudent);
-    fs.writeFileSync(STUDENTS_FILE, JSON.stringify(students, null, 2), "utf8");
+    try {
+      await setDoc(studentDocRef, newStudent);
+    } catch (writeErr) {
+      handleFirestoreError(writeErr, OperationType.WRITE, `students/${verifiedHandle.toLowerCase()}`);
+    }
 
     // Cache user info immediately to avoid extra delay later
     cfUserCache[verifiedHandle.toLowerCase()] = {
@@ -310,7 +366,7 @@ app.post("/api/users", async (req, res) => {
 });
 
 // 3. Remove/Unregister database user (for ease of administration and management)
-app.delete("/api/users/:handle", (req, res) => {
+app.delete("/api/users/:handle", async (req, res) => {
   try {
     const { handle } = req.params;
     const clientPassword = req.headers["x-creator-password"] as string || "";
@@ -320,17 +376,18 @@ app.delete("/api/users/:handle", (req, res) => {
       return res.status(401).json({ error: "Unauthorized: Invalid or missing Creator verification code/password." });
     }
 
-    if (!fs.existsSync(STUDENTS_FILE)) {
-      return res.status(404).json({ error: "No students dataset found." });
-    }
-    const students = JSON.parse(fs.readFileSync(STUDENTS_FILE, "utf8"));
-    const updated = students.filter((s: any) => s.handle.toLowerCase() !== handle.toLowerCase());
-    
-    if (students.length === updated.length) {
+    const studentDocRef = doc(db, "students", handle.toLowerCase());
+    const studentDocSnap = await getDoc(studentDocRef);
+    if (!studentDocSnap.exists()) {
       return res.status(404).json({ error: "Student not found." });
     }
 
-    fs.writeFileSync(STUDENTS_FILE, JSON.stringify(updated, null, 2), "utf8");
+    try {
+      await deleteDoc(studentDocRef);
+    } catch (delErr) {
+      handleFirestoreError(delErr, OperationType.DELETE, `students/${handle.toLowerCase()}`);
+    }
+
     res.json({ success: true, message: `Successfully removed user "${handle}"` });
   } catch (error: any) {
     res.status(500).json({ error: "Failed to delete student", details: error.message });
@@ -340,10 +397,12 @@ app.delete("/api/users/:handle", (req, res) => {
 // 4. Batch get CF Info for of all students
 app.get("/api/cf/users-status", async (req, res) => {
   try {
-    if (!fs.existsSync(STUDENTS_FILE)) {
-      return res.json([]);
-    }
-    const students = JSON.parse(fs.readFileSync(STUDENTS_FILE, "utf8"));
+    const studentsSnap = await getDocs(collection(db, "students"));
+    const students: any[] = [];
+    studentsSnap.forEach((doc) => {
+      students.push(doc.data());
+    });
+    
     const handles = students.map((s: any) => s.handle);
 
     if (handles.length === 0) {
@@ -410,6 +469,8 @@ app.post("/api/auth/verify-creator", (req, res) => {
 
 // Setup Vite & static service
 async function startServer() {
+  await initData();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

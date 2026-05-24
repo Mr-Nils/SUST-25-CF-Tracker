@@ -1,0 +1,35 @@
+{
+  "entities": {
+    "student": {
+      "title": "student",
+      "description": "Represents a registered student participant tracking their Codeforces handles.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The full name of the student"
+        },
+        "handle": {
+          "type": "string",
+          "description": "The unique Codeforces handle of the student"
+        },
+        "regNo": {
+          "type": "string",
+          "description": "SUST Academic Registration Number"
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this record was registered"
+        }
+      },
+      "required": ["name", "handle", "regNo", "addedAt"]
+    }
+  },
+  "firestore": {
+    "/students/{studentId}": {
+      "schema": "student",
+      "description": "Durable registry database collection for student competitors indexed by their lowercased handle."
+    }
+  }
+}

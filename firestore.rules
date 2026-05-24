@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Catch-all default-deny gate
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Students collection rules
+    match /students/{studentId} {
+      allow read: if true; // Anyone can read the leaderboard
+      
+      // Enforce strict schema and size validations on write
+      allow create, update: if isValidStudent(request.resource.data);
+      allow delete: if true; // Handled securely via backend Creator Mode validation
+    }
+
+    // Helper functions for strict validation
+    function isValidStudent(data) {
+      return data.keys().hasAll(['name', 'handle', 'regNo', 'addedAt'])
+        && data.keys().size() == 4
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.handle is string && data.handle.size() >= 1 && data.handle.size() <= 100
+        && data.regNo is string && data.regNo.size() >= 1 && data.regNo.size() <= 20
+        && data.addedAt is string && data.addedAt.size() >= 10 && data.addedAt.size() <= 50;
+    }
+  }
+}

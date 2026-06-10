@@ -7,7 +7,7 @@ import { getFirestore, collection, getDocs, setDoc, doc, deleteDoc, getDoc, quer
 
 const PORT = 3000;
 
-// Initialize Firebase SDK
+// Initialize Firebase SDK via official Web Client SDK
 const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
 const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf8"));
 const firebaseApp = initializeApp(firebaseConfig);
@@ -87,8 +87,29 @@ app.use(express.json());
 const cacheDuration = 5 * 60 * 1000; // 5 minutes list cache
 const cfUserCache: Record<string, { data: any; timestamp: number }> = {};
 const cfSubmissionsCache: Record<string, { data: any; timestamp: number }> = {};
+const cfContestsCache: Record<string, { data: any; timestamp: number }> = {};
 
-// Helper function to fetch user info from Codeforces with caching
+// Global tracker for Codeforces server IP block/rate limit (preventing log pollution and wasteful delays)
+let isServerIpBlocked = false;
+let serverBlockedUntil = 0;
+
+function checkServerBlock(): boolean {
+  if (isServerIpBlocked && Date.now() < serverBlockedUntil) {
+    return true;
+  }
+  isServerIpBlocked = false;
+  return false;
+}
+
+function flagServerBlocked() {
+  if (!isServerIpBlocked) {
+    console.warn("[CF API Gatekeeper] Flagging server IP as blocked or rate-limited by Codeforces. Standard server fetches will be bypassed to prevent rate limits/downtime log spam.");
+  }
+  isServerIpBlocked = true;
+  serverBlockedUntil = Date.now() + 15 * 60 * 1000; // Bypassed for 15 minutes
+}
+
+// Helper function to fetch user info from Codeforces with caching and smart batch retries
 async function fetchCFUserInfo(handles: string[]) {
   const handlesToFetch = [];
   const result: any[] = [];
@@ -106,46 +127,62 @@ async function fetchCFUserInfo(handles: string[]) {
 
   // If we have uncached handles, load them from CF API
   if (handlesToFetch.length > 0) {
-    // Codeforces user.info accepts semicolon separated handles
-    const url = `https://codeforces.com/api/user.info?handles=${handlesToFetch.join(";")}`;
-    try {
-      console.log(`[CF API] Fetching info for: ${handlesToFetch.join(", ")}`);
-      const response = await fetch(url);
-      const data = await response.json();
-      
-      if (data.status === "OK" && Array.isArray(data.result)) {
-        data.result.forEach((info: any) => {
-          const lowerH = info.handle.toLowerCase();
-          cfUserCache[lowerH] = {
-            data: info,
-            timestamp: Date.now()
-          };
-          result.push(info);
-        });
-      } else {
-        console.warn(`[CF API Error] Semicolon batch fetch failed: ${data.comment || "Unknown error"}. Falling back to individual queries.`);
-        
-        // Loop and fetch individual profiles so one bad handle doesn't crash the entire list
-        for (const singleHandle of handlesToFetch) {
-          const singleUrl = `https://codeforces.com/api/user.info?handles=${singleHandle}`;
-          try {
-            const singleResponse = await fetch(singleUrl);
-            const singleData = await singleResponse.json();
-            
-            if (singleData.status === "OK" && Array.isArray(singleData.result) && singleData.result.length > 0) {
-              const info = singleData.result[0];
+    if (checkServerBlock()) {
+      console.log(`[CF API Gatekeeper] Server IP is temporarily blocked. Serving cached/offline placeholders for: ${handlesToFetch.join(", ")}`);
+    } else {
+      let activeHandles = [...handlesToFetch];
+      let fetchSuccess = false;
+      let attempts = 0;
+      const maxAttempts = 5;
+
+      while (activeHandles.length > 0 && !fetchSuccess && attempts < maxAttempts) {
+        attempts++;
+        const url = `https://codeforces.com/api/user.info?handles=${activeHandles.join(";")}`;
+        try {
+          console.log(`[CF API] Batch fetch attempt ${attempts} for ${activeHandles.length} handles: ${activeHandles.join(", ")}`);
+          const response = await fetch(url);
+          
+          // Handle non-JSON responses gracefully (e.g. Cloudflare or downtime HTML)
+          const contentType = response.headers.get("content-type") || "";
+          if (!contentType.includes("application/json")) {
+            const text = await response.text();
+            console.warn(`[CF API Error] Non-JSON response received (likely Cloudflare block/CAPTCHA):`, text.substring(0, 200));
+            flagServerBlocked();
+            break;
+          }
+
+          const data = await response.json();
+          
+          if (data.status === "OK" && Array.isArray(data.result)) {
+            data.result.forEach((info: any) => {
               const lowerH = info.handle.toLowerCase();
               cfUserCache[lowerH] = {
                 data: info,
                 timestamp: Date.now()
               };
-            } else {
-              console.error(`[CF API Error] Individual handle "${singleHandle}" could not be resolved: ${singleData.comment}`);
-              // Cache unrated metadata placeholder with error flag so we don't request spam Codeforces API repeatedly
-              const lowerH = singleHandle.toLowerCase();
-              cfUserCache[lowerH] = {
+              result.push(info);
+            });
+            fetchSuccess = true;
+            console.log(`[CF API] Successfully batch resolved info for ${data.result.length} handles.`);
+          } else if (data.status === "FAILED" && data.comment) {
+            console.warn(`[CF API Batch Failed] ${data.comment}`);
+            
+            if (data.comment.includes("Call limit exceeded")) {
+              console.warn(`[CF API Rate Limited] "Call limit exceeded" on batch. Stopping immediate retries.`);
+              flagServerBlocked();
+              break;
+            }
+
+            // Parse invalid handle from comment e.g. "handles: User with handle touristt not found"
+            const match = data.comment.match(/User with handle (.*?) not found/i);
+            if (match && match[1]) {
+              const badHandle = match[1].trim();
+              console.log(`[CF API Handle Resolver] Identified invalid handle: "${badHandle}". Caching as unrated and retrying without it.`);
+              
+              // Cache bad handle to prevent querying it later
+              cfUserCache[badHandle.toLowerCase()] = {
                 data: {
-                  handle: singleHandle,
+                  handle: badHandle,
                   rating: 0,
                   maxRating: 0,
                   rank: "unrated",
@@ -156,19 +193,93 @@ async function fetchCFUserInfo(handles: string[]) {
                 },
                 timestamp: Date.now()
               };
+
+              // Remove bad handle and retry remaining list in the next loop iteration
+              activeHandles = activeHandles.filter(h => h.toLowerCase() !== badHandle.toLowerCase());
+            } else {
+              console.warn(`[CF API Error] Unmapped batch error comment: "${data.comment}". Falling back.`);
+              break;
             }
-          } catch (err) {
-            console.error(`[CF API Error] Exception during individual query for "${singleHandle}":`, err);
+          } else {
+            console.warn(`[CF API Error] Unexpected response status/format:`, data);
+            break;
+          }
+        } catch (err) {
+          console.error(`[CF API Exception on attempt ${attempts}]`, err);
+          flagServerBlocked();
+          break;
+        }
+      }
+
+      // Gentle recovery fallback using individual requests with deliberate spacing of 1.1s to avoid hitting 1 req/sec limit
+      if (!fetchSuccess && activeHandles.length > 0 && !checkServerBlock()) {
+        console.log(`[CF API Recovery] Initiating gentle individual fetches for remaining ${activeHandles.length} handles.`);
+        let spacedRequestIndex = 0;
+        for (const h of activeHandles) {
+          if (checkServerBlock()) {
+            console.log(`[CF API Gatekeeper] Aborting remaining recovery queries due to server block.`);
+            break;
+          }
+
+          const lowerH = h.toLowerCase();
+          
+          // Check if we already cached this as an error/not_found in this cycle
+          if (cfUserCache[lowerH] && cfUserCache[lowerH].data.error === "not_found") {
+            continue;
+          }
+
+          const singleUrl = `https://codeforces.com/api/user.info?handles=${h}`;
+          try {
+            if (spacedRequestIndex > 0) {
+              // Wait 1.1 seconds before executing the next request to prevent Call limit exceeded
+              console.log(`[CF API Throttle] Delaying individual request for "${h}" by 1100ms...`);
+              await new Promise(resolve => setTimeout(resolve, 1100));
+            }
+            spacedRequestIndex++;
+
+            const response = await fetch(singleUrl);
+            const contentType = response.headers.get("content-type") || "";
+            if (contentType.includes("application/json")) {
+              const data = await response.json();
+              if (data.status === "OK" && Array.isArray(data.result) && data.result.length > 0) {
+                const info = data.result[0];
+                cfUserCache[lowerH] = {
+                  data: info,
+                  timestamp: Date.now()
+                };
+                console.log(`[CF API Recovery] Successfully loaded individual handle "${h}".`);
+              } else {
+                console.warn(`[CF API Recovery Failed] Individual profile lookup for "${h}": ${data.comment || "Not found"}`);
+                cfUserCache[lowerH] = {
+                  data: {
+                    handle: h,
+                    rating: 0,
+                    maxRating: 0,
+                    rank: "unrated",
+                    maxRank: "unrated",
+                    avatar: "https://userpic.codeforces.org/no-avatar.jpg",
+                    offline: true,
+                    error: data.comment && data.comment.includes("Call limit exceeded") ? "rate_limited" : "not_found"
+                  },
+                  timestamp: Date.now()
+                };
+                if (data.comment?.includes("Call limit exceeded")) {
+                  flagServerBlocked();
+                }
+              }
+            } else {
+              console.warn(`[CF API Recovery Failed] Individual profile lookup for "${h}" returned non-JSON.`);
+              flagServerBlocked();
+            }
+          } catch (singleErr) {
+            console.error(`[CF API Recovery Exception] for "${h}":`, singleErr);
           }
         }
       }
-    } catch (e) {
-      console.error(`[CF API Exception]`, e);
     }
   }
 
-  // Map requested handles in order (including cached and newly loaded ones)
-  // Fill missing handles with offline/null structure to prevent crashes
+  // Return mapped handles in order
   return handles.map(h => {
     const lowerH = h.toLowerCase();
     return cfUserCache[lowerH]?.data || {
@@ -192,10 +303,30 @@ async function fetchCFUserSubmissions(handle: string) {
     return cfSubmissionsCache[lowerH].data;
   }
 
+  if (checkServerBlock()) {
+    console.log(`[CF API Gatekeeper] Server IP is temporarily blocked. Serving offline submissions fallback structure for: ${handle}`);
+    return {
+      totalSolved: 0,
+      solvedProblems: [],
+      ratingDistribution: {},
+      tagDistribution: {},
+      offline: true,
+      lastUpdated: Date.now()
+    };
+  }
+
   const url = `https://codeforces.com/api/user.status?handle=${handle}`;
   try {
     console.log(`[CF API] Fetching submissions for: ${handle}`);
     const response = await fetch(url);
+    
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      console.warn(`[CF API Submissions Error] Non-JSON response received (likely Cloudflare block) for: ${handle}`);
+      flagServerBlocked();
+      throw new Error("Cloudforces API returned non-JSON");
+    }
+
     const data = await response.json();
 
     if (data.status === "OK" && Array.isArray(data.result)) {
@@ -266,6 +397,48 @@ async function fetchCFUserSubmissions(handle: string) {
   };
 }
 
+// Helper to fetch contest rating history from Codeforces
+async function fetchCFUserContests(handle: string) {
+  const lowerH = handle.toLowerCase();
+  const now = Date.now();
+
+  if (cfContestsCache[lowerH] && (now - cfContestsCache[lowerH].timestamp < cacheDuration)) {
+    return cfContestsCache[lowerH].data;
+  }
+
+  if (checkServerBlock()) {
+    console.log(`[CF API Gatekeeper] Server IP is temporarily blocked. Serving offline contests fallback structure for: ${handle}`);
+    return [];
+  }
+
+  const url = `https://codeforces.com/api/user.rating?handle=${handle}`;
+  try {
+    console.log(`[CF API] Fetching contests history for: ${handle}`);
+    const response = await fetch(url);
+    
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      console.warn(`[CF API Contests Error] Non-JSON response received (likely Cloudflare block) for: ${handle}`);
+      flagServerBlocked();
+      throw new Error("Cloudforces API returned non-JSON");
+    }
+
+    const data = await response.json();
+
+    if (data.status === "OK" && Array.isArray(data.result)) {
+      cfContestsCache[lowerH] = {
+        data: data.result,
+        timestamp: now
+      };
+      return data.result;
+    }
+  } catch (e) {
+    console.error(`[CF API Exception Contests] for ${handle}`, e);
+  }
+
+  return [];
+}
+
 // 1. Get all registered students
 app.get("/api/users", async (req, res) => {
   try {
@@ -312,17 +485,35 @@ app.post("/api/users", async (req, res) => {
       return res.status(400).json({ error: "Could not parse a valid Codeforces handle from input." });
     }
 
-    // Verify handle existence with Codeforces API
+    // Verify handle existence with Codeforces API (with robust resilience)
     const url = `https://codeforces.com/api/user.info?handles=${handle}`;
-    const cfRes = await fetch(url);
-    const cfData = await cfRes.json();
-
-    if (cfData.status !== "OK" || !cfData.result || cfData.result.length === 0) {
-      return res.status(400).json({ error: `The Codeforces handle "${handle}" could not be found or verified by Codeforces API.` });
+    let cfData: any = null;
+    try {
+      const cfRes = await fetch(url);
+      cfData = await cfRes.json();
+    } catch (fetchErr: any) {
+      console.warn(`[CF Verification Fetch Exception] for ${handle}:`, fetchErr);
     }
 
-    // Get verified handle capitalization representing real user
-    const verifiedHandle = cfData.result[0].handle;
+    let verifiedHandle = handle;
+    let cfUserInfo: any = null;
+
+    if (cfData && cfData.status === "OK" && Array.isArray(cfData.result) && cfData.result.length > 0) {
+      // Clean, verified handle directly from official response
+      verifiedHandle = cfData.result[0].handle;
+      cfUserInfo = cfData.result[0];
+    } else {
+      // If CF API is rate limited ("Call limit exceeded") or temporarily down/unreachable,
+      // we must NOT lock out valid students! Protect historical rosters and allow registration by verifying format.
+      // Standard CF handle validation regex: 3 to 24 characters, alphanumeric, hyphen, or underscore
+      const handleRegex = /^[a-zA-Z0-9_\-]{3,24}$/;
+      if (!handleRegex.test(handle)) {
+        return res.status(400).json({
+          error: `The handle "${handle}" contains invalid characters or does not meet the Codeforces handle criteria (3-24 characters, letters, digits, '_' or '-').`
+        });
+      }
+      console.log(`[CF API Offline / Rate Limited] Gracefully bypassing validation check for CF handle: ${handle}`);
+    }
 
     // Check duplicate handle
     const studentDocRef = doc(db, "students", verifiedHandle.toLowerCase());
@@ -332,18 +523,18 @@ app.post("/api/users", async (req, res) => {
     }
 
     // Check duplicate registration number
-    const regQuery = query(collection(db, "students"), where("regNo", "==", regNo.trim()));
-    const regQuerySnap = await getDocs(regQuery);
+    const regQuerySnap = await getDocs(query(collection(db, "students"), where("regNo", "==", regNo.trim())));
     if (!regQuerySnap.empty) {
       return res.status(400).json({ error: `Registration number "${regNo}" is already registered.` });
     }
 
-    // Save
+        // Save
     const newStudent = {
       name: name.trim(),
       handle: verifiedHandle,
       regNo: regNo.trim(),
-      addedAt: new Date().toISOString()
+      addedAt: new Date().toISOString(),
+      cfData: cfUserInfo || undefined
     };
 
     try {
@@ -353,10 +544,12 @@ app.post("/api/users", async (req, res) => {
     }
 
     // Cache user info immediately to avoid extra delay later
-    cfUserCache[verifiedHandle.toLowerCase()] = {
-      data: cfData.result[0],
-      timestamp: Date.now()
-    };
+    if (cfUserInfo) {
+      cfUserCache[verifiedHandle.toLowerCase()] = {
+        data: cfUserInfo,
+        timestamp: Date.now()
+      };
+    }
 
     res.json({ success: true, student: newStudent });
   } catch (error: any) {
@@ -394,7 +587,50 @@ app.delete("/api/users/:handle", async (req, res) => {
   }
 });
 
-// 4. Batch get CF Info for of all students
+// Save client-side resolved Codeforces API cache to Firestore
+app.post("/api/cf/save-cache", async (req, res) => {
+  try {
+    const { updates } = req.body;
+    if (!Array.isArray(updates)) {
+      return res.status(400).json({ error: "Required updates array not provided." });
+    }
+
+    console.log(`[Cache Sync] Received background cache sync request for ${updates.length} handles.`);
+
+    for (const item of updates) {
+      const { handle, cfData } = item;
+      if (!handle || !cfData) continue;
+
+      try {
+        const studentDocRef = doc(db, "students", handle.toLowerCase());
+        const studentDocSnap = await getDoc(studentDocRef);
+        if (studentDocSnap.exists()) {
+          const student = studentDocSnap.data();
+          await setDoc(studentDocRef, {
+            ...student,
+            cfData: cfData,
+            lastCfUpdate: new Date().toISOString()
+          }, { merge: true });
+
+          // Also populate our local memory cache so subsequent direct loads get it immediately
+          cfUserCache[handle.toLowerCase()] = {
+            data: cfData,
+            timestamp: Date.now()
+          };
+        }
+      } catch (docErr) {
+        console.warn(`[Cache Sync Error] Failed to cache student "${handle}":`, docErr);
+      }
+    }
+
+    res.json({ success: true, message: "Sync complete" });
+  } catch (error: any) {
+    console.error("[Cache Save Exception]", error);
+    res.status(500).json({ error: "Cache sync failed", details: error.message });
+  }
+});
+
+// 4. Batch get CF Info for of all students with firestore routing caching
 app.get("/api/cf/users-status", async (req, res) => {
   try {
     const studentsSnap = await getDocs(collection(db, "students"));
@@ -409,16 +645,45 @@ app.get("/api/cf/users-status", async (req, res) => {
       return res.json([]);
     }
 
-    // Fetch batch user stats
+    // Fetch batch user stats from Codeforces API
     const cfUsersInfo = await fetchCFUserInfo(handles);
 
-    // Combine student record with CF info
+    // Combine student record with CF info, fallback to existing firestore cache if fresh fetch fails
     const fullState = students.map((student: any) => {
-      const cfInfo = cfUsersInfo.find((u: any) => u.handle.toLowerCase() === student.handle.toLowerCase()) || {};
+      const freshCfInfo = cfUsersInfo.find((u: any) => u.handle.toLowerCase() === student.handle.toLowerCase());
+      
+      const isFreshValid = freshCfInfo && !freshCfInfo.offline && !freshCfInfo.error;
+      const mergedCfData = isFreshValid ? freshCfInfo : (student.cfData || freshCfInfo || {});
+
       return {
         ...student,
-        cfData: cfInfo
+        cfData: mergedCfData
       };
+    });
+
+    // Background update Firestore documents with freshly fetched data so we can fallback next time without rate-limiting blocks
+    students.forEach(async (student: any) => {
+      const freshCfInfo = cfUsersInfo.find((u: any) => u.handle.toLowerCase() === student.handle.toLowerCase());
+      if (freshCfInfo && !freshCfInfo.offline && !freshCfInfo.error) {
+        // Only update if there's new data to preserve DB bandwidth
+        const existingRating = student.cfData?.rating;
+        const freshRating = freshCfInfo.rating;
+        const existingAvatar = student.cfData?.avatar;
+        const freshAvatar = freshCfInfo.avatar;
+
+        if (existingRating !== freshRating || existingAvatar !== freshAvatar || !student.cfData) {
+          try {
+            const studentDocRef = doc(db, "students", student.handle.toLowerCase());
+            await setDoc(studentDocRef, {
+              ...student,
+              cfData: freshCfInfo,
+              lastCfUpdate: new Date().toISOString()
+            }, { merge: true });
+          } catch (bgErr) {
+            console.warn(`[Background DB Cache Update Failed] for ${student.handle}:`, bgErr);
+          }
+        }
+      }
     });
 
     res.json(fullState);
@@ -428,18 +693,42 @@ app.get("/api/cf/users-status", async (req, res) => {
   }
 });
 
-// 5. Get individual student Codeforces submissions statistics
+// 5. Get individual student Codeforces submissions statistics with fallback
 app.get("/api/cf/user-profile/:handle", async (req, res) => {
   try {
     const { handle } = req.params;
     
-    // Get info
+    // Get info from Codeforces API
     const [userInfo] = await fetchCFUserInfo([handle]);
     const submissionsInfo = await fetchCFUserSubmissions(handle);
+    const contestsInfo = await fetchCFUserContests(handle);
+
+    // Fallback to Firestore cached profile info if fresh fetch returned offline/error
+    let mergedUserInfo = userInfo;
+    if (userInfo.offline || userInfo.error) {
+      try {
+        const docRef = doc(db, "students", handle.toLowerCase());
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const studentData = docSnap.data();
+          if (studentData && studentData.cfData) {
+            mergedUserInfo = {
+              ...studentData.cfData,
+              cachedAt: studentData.lastCfUpdate,
+              isCachedFallback: true
+            };
+            console.log(`[CF API Fallback] Serving Firestore cached profile info for ${handle}.`);
+          }
+        }
+      } catch (dbErr) {
+        console.warn(`[Firestore Profile Fallback Lookup Failed] for ${handle}:`, dbErr);
+      }
+    }
 
     res.json({
-      info: userInfo,
-      submissions: submissionsInfo
+      info: mergedUserInfo,
+      submissions: submissionsInfo,
+      contests: contestsInfo
     });
   } catch (error: any) {
     console.error("[Individual Profile API Error]", error);

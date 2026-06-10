@@ -293,8 +293,11 @@ export default function Leaderboard({ students, isLoading, onSelectStudent, onDe
                           className="w-10 h-10 rounded-lg bg-cyber-dark border border-gray-800 object-cover"
                         />
                         <div className="flex flex-col min-w-0 max-w-[200px] sm:max-w-xs md:max-w-sm">
-                          <span className="text-white font-semibold truncate group-hover:text-cyber-cyan transition-colors">
-                            {student.name}
+                          <span className="text-white font-semibold truncate group-hover:text-cyber-cyan transition-colors flex items-center gap-1.5 flex-wrap">
+                            <span>{student.name}</span>
+                            <span className={`text-[9px] uppercase tracking-wider font-extrabold font-mono px-1.5 py-0.5 rounded ${rankStyles.textColor} ${rankStyles.bgClass} border border-current/10 whitespace-nowrap`}>
+                              {rankStyles.rankName}
+                            </span>
                           </span>
                           <span className="text-gray-500 text-xs flex items-center gap-1.5 mt-0.5">
                             <span className={`font-semibold tracking-wider ${rankStyles.textColor}`} style={{ textShadow: rankStyles.textShadow }}>

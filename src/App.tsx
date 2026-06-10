@@ -3,6 +3,7 @@ import { FullStudent } from "./types";
 import RegistrationForm from "./components/RegistrationForm";
 import Leaderboard from "./components/Leaderboard";
 import UserProfile from "./components/UserProfile";
+import { cfGetUserInfo } from "./cfApi";
 import { 
   Trophy, 
   Terminal, 
@@ -12,16 +13,33 @@ import {
   RefreshCw, 
   Flame, 
   ShieldCheck, 
+  ShieldAlert, 
   Trash2,
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  Sun,
+  Moon
 } from "lucide-react";
 
 export default function App() {
   const [students, setStudents] = useState<FullStudent[]>([]);
+  const [cfApiStatus, setCfApiStatus] = useState<"checking" | "online" | "degraded" | "offline">("checking");
   const [loading, setLoading] = useState(true);
   const [selectedStudent, setSelectedStudent] = useState<FullStudent | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    return (localStorage.getItem("app_theme") as "dark" | "light") || "dark";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "light") {
+      root.classList.add("light-theme");
+    } else {
+      root.classList.remove("light-theme");
+    }
+    localStorage.setItem("app_theme", theme);
+  }, [theme]);
 
   // Creator state
   const [isCreator, setIsCreator] = useState<boolean>(() => {
@@ -30,6 +48,10 @@ export default function App() {
   const [showCreatorModal, setShowCreatorModal] = useState(false);
   const [creatorInput, setCreatorInput] = useState("");
   const [creatorError, setCreatorError] = useState<string | null>(null);
+
+  // Custom non-blocking modal states (iframe safe)
+  const [confirmModal, setConfirmModal] = useState<{ title: string; subtitle: string; onConfirm: () => void } | null>(null);
+  const [alertModal, setAlertModal] = useState<{ title: string; message: string } | null>(null);
 
   const handleCreatorToggle = () => {
     if (isCreator) {
@@ -84,7 +106,7 @@ export default function App() {
     expertsCount: students.filter(s => (s.cfData?.rating || 0) >= 1600).length
   };
 
-  // Fetch all students status joined with CF metadata
+  // Fetch all students status joined with CF metadata (with automatic client-assisted rate-limit self-healing)
   const loadStudentsStatus = async (silent = false) => {
     if (!silent) setLoading(true);
     setError(null);
@@ -93,8 +115,89 @@ export default function App() {
       if (!response.ok) {
         throw new Error("Failure communicating with SUST CF Proxy server.");
       }
-      const data = await response.json();
+      const data: FullStudent[] = await response.json();
+      
+      // Set the initial list immediately using whatever server/database cached state is available
       setStudents(data);
+
+      // Initiate asynchronous client-side direct Codeforces fetch to bypass server IP rate limits (Cloudflare or CORS restrictions)
+      const handles = data.map((s: any) => s.handle).filter(Boolean);
+      if (handles.length > 0) {
+        // Run in the background without blocking the UI
+        (async () => {
+          let activeHandles = [...handles];
+          let results: any[] = [];
+          let fetchSuccess = false;
+          let attempts = 0;
+          const maxAttempts = 5;
+
+          while (activeHandles.length > 0 && !fetchSuccess && attempts < maxAttempts) {
+            attempts++;
+            try {
+              console.log(`[Client CF Direct Query (JSONP)] Fetching ${activeHandles.length} handles...`);
+              const cfResult = await cfGetUserInfo(activeHandles);
+              results = cfResult;
+              fetchSuccess = true;
+              setCfApiStatus("online");
+            } catch (cfErr: any) {
+              console.warn(`[Client CF API Direct Fetch Exception on attempt ${attempts}]:`, cfErr.message || cfErr);
+              
+              const errMsg = cfErr.message || String(cfErr);
+              if (errMsg.includes("Call limit exceeded") || errMsg.includes("limit")) {
+                setCfApiStatus("degraded");
+              }
+              // Handle bad handles by parsing the failure comment if available
+              const match = errMsg.match(/User with handle (.*?) not found/i);
+              if (match && match[1]) {
+                const badHandle = match[1].trim().toLowerCase();
+                activeHandles = activeHandles.filter(h => h.toLowerCase() !== badHandle);
+                console.log(`[Client CF Direct Query Self-Healing] Pruned bad handle "${badHandle}" from active query list.`);
+              } else {
+                // If it's a call limit exceeded or general error, we stop retrying
+                break;
+              }
+            }
+          }
+
+          if (!fetchSuccess && results.length === 0) {
+            setCfApiStatus("offline");
+          }
+
+          if (results.length > 0) {
+            // Update React state with fresh client-resolved real-time stats
+            setStudents(prevStudents => {
+              return prevStudents.map(student => {
+                const freshCf = results.find(
+                  r => r.handle.toLowerCase() === student.handle.toLowerCase()
+                );
+                return freshCf ? { ...student, cfData: freshCf } : student;
+              });
+            });
+
+            // Sync these fresh results back to server database backup cache
+            const updates = results.map(r => ({
+              handle: r.handle,
+              cfData: r
+            }));
+
+            fetch("/api/cf/save-cache", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ updates })
+            })
+            .then(res => res.json())
+            .then(resData => {
+              if (resData.success) {
+                console.log(`[Cache Sync Success] Updated database-level backup cache for ${results.length} students.`);
+              }
+            })
+            .catch(syncErr => {
+              console.warn("[Cache Sync Warning] Background database cache sync failed:", syncErr);
+            });
+          }
+        })();
+      }
+
     } catch (err: any) {
       console.error("[Load Students Status Error]", err);
       setError(err.message || "Failed to parse batch member directories.");
@@ -103,40 +206,47 @@ export default function App() {
     }
   };
 
-  // Delete/unregister a student
-  const handleDeleteStudent = async (handle: string) => {
+  // Delete/unregister a student (resilient non-blocking modal flow)
+  const handleDeleteStudent = (handle: string) => {
     if (!isCreator) {
-      alert("Operation Denied: Only certified Creator is allowed to remove user registrations.");
-      return;
-    }
-
-    if (!confirm(`Are you sure you want to unregister CF handle "${handle}" from SUST 25 workspace database?`)) {
-      return;
-    }
-
-    const creatorPassword = localStorage.getItem("creator_password") || "";
-
-    try {
-      const response = await fetch(`/api/users/${handle}`, {
-        method: "DELETE",
-        headers: {
-          "x-creator-password": creatorPassword
-        }
+      setAlertModal({
+        title: "Access Forbidden",
+        message: "Operation Denied: Only certified Creator is allowed to remove user registrations."
       });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to delete student.");
-      }
-
-      // Reload
-      loadStudentsStatus(true);
-      if (selectedStudent?.handle.toLowerCase() === handle.toLowerCase()) {
-        setSelectedStudent(null);
-      }
-    } catch (err: any) {
-      alert(`Error unregistering user: ${err.message}`);
+      return;
     }
+
+    setConfirmModal({
+      title: "Remove Registration",
+      subtitle: `Are you sure you want to unregister CF handle "${handle}" from SUST '25 workspace database?`,
+      onConfirm: async () => {
+        const creatorPassword = localStorage.getItem("creator_password") || "";
+        try {
+          const response = await fetch(`/api/users/${handle}`, {
+            method: "DELETE",
+            headers: {
+              "x-creator-password": creatorPassword
+            }
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || "Failed to delete student.");
+          }
+
+          // Reload
+          loadStudentsStatus(true);
+          if (selectedStudent?.handle.toLowerCase() === handle.toLowerCase()) {
+            setSelectedStudent(null);
+          }
+        } catch (err: any) {
+          setAlertModal({
+            title: "Network protocol failure",
+            message: `Error unregistering user: ${err.message}`
+          });
+        }
+      }
+    });
   };
 
   useEffect(() => {
@@ -179,11 +289,37 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3 font-mono">
-            <span className="hidden sm:inline text-xs text-gray-500">SYSTEM status: </span>
+            <span className="hidden lg:inline text-xs text-gray-500">SYSTEM: </span>
             <span className="px-2 py-1 rounded bg-[#00ff87]/10 border border-[#00ff87]/30 text-[#00ff87] text-[10px] uppercase font-bold tracking-widest flex items-center gap-1">
               <span className="w-1.5 h-1.5 bg-[#00ff87] rounded-full animate-ping"></span>
-              Live Online
+              HUB LIVE
             </span>
+
+            {/* Codeforces API status badge */}
+            {cfApiStatus === "checking" && (
+              <span className="px-2 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] uppercase font-bold tracking-widest flex items-center gap-1 animate-pulse" title="System is currently checking Codeforces API status and fetching batch data...">
+                <span className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-ping"></span>
+                CF API: TIMING...
+              </span>
+            )}
+            {cfApiStatus === "online" && (
+              <span className="px-2 py-1 rounded bg-cyber-cyan/15 border border-cyber-cyan/40 text-cyber-cyan text-[10px] uppercase font-bold tracking-widest flex items-center gap-1">
+                <span className="w-1.5 h-1.5 bg-cyber-cyan rounded-full"></span>
+                CF API: ONLINE
+              </span>
+            )}
+            {cfApiStatus === "degraded" && (
+              <span className="px-2 py-1 rounded bg-orange-500/10 border border-orange-500/30 text-orange-400 text-[10px] uppercase font-bold tracking-widest flex items-center gap-1" title="Codeforces is rate-limiting of API requests (Call limit exceeded)">
+                <span className="w-1.5 h-1.5 bg-orange-400 rounded-full animate-pulse"></span>
+                CF API: COOLDOWN
+              </span>
+            )}
+            {cfApiStatus === "offline" && (
+              <span className="px-2 py-1 rounded bg-red-500/10 border border-red-500/40 text-red-400 text-[10px] uppercase font-bold tracking-widest flex items-center gap-1" title="API Unreachable or Down. Serving cached backup ratings from Firestore database securely.">
+                <span className="w-1.5 h-1.5 bg-red-400 rounded-full"></span>
+                CF API: OFFLINE (CACHED)
+              </span>
+            )}
             <button
               onClick={handleCreatorToggle}
               className={`px-3 py-1 text-xs font-bold rounded-md border tracking-wider transition-all duration-300 flex items-center gap-1.5 uppercase cursor-pointer ${
@@ -194,12 +330,46 @@ export default function App() {
             >
               {isCreator ? "🔓 Creator Mode" : "🔒 Creator Login"}
             </button>
+
+            {/* Bright/Dark Mode Toggle Button */}
+            <button
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              className="p-1.5 rounded-lg border border-gray-800 text-gray-400 hover:text-cyber-yellow hover:border-cyber-yellow/40 bg-cyber-panel transition-all duration-300 cursor-pointer flex items-center justify-center"
+              title={theme === "dark" ? "Toggle Bright Mode" : "Toggle Dark Mode"}
+              id="theme-toggle-btn"
+            >
+              {theme === "dark" ? (
+                <Sun className="w-4 h-4 text-cyber-yellow shrink-0" />
+              ) : (
+                <Moon className="w-4 h-4 text-purple-600 shrink-0" />
+              )}
+            </button>
           </div>
         </div>
       </header>
 
       {/* Section 2: Main Outer container */}
-      <main className="max-w-7xl mx-auto px-4 md:px-6 py-6 md:py-8 flex-grow w-full relative z-10 space-y-8">
+      <main className="max-w-7xl mx-auto px-4 md:px-6 py-6 md:py-8 flex-grow w-full relative z-10 space-y-6 md:space-y-8">
+        
+        {/* Codeforces server offline / degraded banner notice */}
+        {(cfApiStatus === "offline" || cfApiStatus === "degraded") && (
+          <div className="p-4 rounded-xl bg-gradient-to-r from-amber-950/20 to-red-950/15 border border-amber-500/25 text-amber-300 text-xs md:text-sm font-mono relative overflow-hidden group shadow-md animate-pulse">
+            <div className="absolute inset-y-0 left-0 w-1 bg-gradient-to-b from-amber-500 to-red-500"></div>
+            <div className="flex items-start gap-3">
+              <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-extrabold text-white uppercase tracking-wider block mb-1">
+                  Codeforces Server Outage / Rate Protection Active
+                </span>
+                <span className="text-gray-300 leading-relaxed block">
+                  {cfApiStatus === "offline" 
+                    ? "The Codeforces central API servers are currently unreachable, offline, or heavily rate-limiting inquiries. The SUST '25 Battleground Hub has automatically switched the background client sync to our Firestore persistent backup cache to protect system uptime. All competitor ranks and ratings remain fully readable!"
+                    : "The Codeforces central API continues to trigger a query 'Call limit exceeded' cooldown. Some real-time competitor stat refreshes might be rate-protected. Serve limits are preserved via offline backups."}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
         
         {/* Error warning banner */}
         {error && (
@@ -398,6 +568,59 @@ export default function App() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Asynchronous Confirmation Dialog Modal */}
+      {confirmModal && (
+        <div className="fixed inset-0 bg-cyber-dark/95 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in font-mono">
+          <div className="bg-cyber-panel border border-cyber-pink/50 rounded-xl p-6 max-w-sm w-full shadow-2xl relative">
+            <h3 className="text-sm font-bold text-cyber-pink uppercase tracking-widest mb-2 flex items-center gap-2">
+              <span>⚠</span> {confirmModal.title}
+            </h3>
+            <p className="text-gray-400 mb-6 text-xs leading-relaxed">
+              {confirmModal.subtitle}
+            </p>
+            <div className="flex items-center justify-end gap-3 font-mono text-xs">
+              <button
+                onClick={() => setConfirmModal(null)}
+                className="px-3 py-1.5 rounded border border-gray-800 text-gray-400 hover:text-white transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  confirmModal.onConfirm();
+                  setConfirmModal(null);
+                }}
+                className="px-4 py-1.5 rounded bg-red-500 hover:bg-red-600 text-white font-bold tracking-wide transition-all shadow-neon-pink cursor-pointer"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Asynchronous Alert / Notification Dialogue Modal */}
+      {alertModal && (
+        <div className="fixed inset-0 bg-cyber-dark/95 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in font-mono">
+          <div className="bg-cyber-panel border border-cyber-cyan/50 rounded-xl p-6 max-w-sm w-full shadow-2xl relative">
+            <h3 className="text-sm font-bold text-cyber-cyan uppercase tracking-widest mb-2 flex items-center gap-2">
+              <span>ℹ</span> {alertModal.title}
+            </h3>
+            <p className="text-gray-400 mb-6 text-xs leading-relaxed">
+              {alertModal.message}
+            </p>
+            <div className="flex items-center justify-end font-mono text-xs">
+              <button
+                onClick={() => setAlertModal(null)}
+                className="px-4 py-1.5 rounded bg-cyber-cyan hover:bg-cyber-cyan/80 text-cyber-dark font-bold tracking-wide transition-all shadow-neon-cyan cursor-pointer"
+              >
+                Acknowledge
+              </button>
+            </div>
           </div>
         </div>
       )}

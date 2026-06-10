@@ -34,6 +34,16 @@ export interface SolvedProblem {
   solvedAt: number;
 }
 
+export interface CFContest {
+  contestId: number;
+  contestName: string;
+  handle: string;
+  rank: number;
+  ratingUpdateTimeSeconds: number;
+  oldRating: number;
+  newRating: number;
+}
+
 export interface CFSubmissions {
   totalSolved: number;
   solvedProblems: SolvedProblem[];
@@ -46,4 +56,5 @@ export interface CFSubmissions {
 export interface ProfileDetails {
   info: CFData;
   submissions: CFSubmissions;
+  contests?: CFContest[];
 }

@@ -64,3 +64,66 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #00f0ff;
 }
+
+/* Light/Bright Mode Global Overrides */
+:root.light-theme {
+  --color-cyber-dark: #f8fafc;
+  --color-cyber-panel: #ffffff;
+  --color-cyber-panel-light: #f1f5f9;
+  color-scheme: light;
+}
+
+:root.light-theme ::-webkit-scrollbar-track {
+  background: #f8fafc;
+}
+
+:root.light-theme ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+
+:root.light-theme .text-white {
+  color: #1e293b !important;
+}
+
+:root.light-theme .text-gray-100 {
+  color: #334155 !important;
+}
+
+:root.light-theme .text-gray-300 {
+  color: #334155 !important;
+}
+
+:root.light-theme .text-gray-400 {
+  color: #475569 !important;
+}
+
+:root.light-theme .text-gray-500 {
+  color: #64748b !important;
+}
+
+:root.light-theme .border-gray-900,
+:root.light-theme .border-gray-800 {
+  border-color: #e2e8f0 !important;
+}
+
+:root.light-theme .bg-cyber-dark {
+  background-color: #f8fafc !important;
+}
+
+:root.light-theme .bg-cyber-panel {
+  background-color: #ffffff !important;
+}
+
+:root.light-theme .bg-cyber-dark\/40 {
+  background-color: rgba(241, 245, 249, 0.4) !important;
+}
+
+:root.light-theme .hover\:bg-cyber-dark-panel\/40:hover {
+  background-color: rgba(241, 245, 249, 0.7) !important;
+}
+
+:root.light-theme .divide-gray-900\/60,
+:root.light-theme .divide-gray-900\/40 {
+  border-color: rgba(226, 232, 240, 0.7) !important;
+}
+

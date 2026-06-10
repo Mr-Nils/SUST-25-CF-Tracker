@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
-import { ProfileDetails, FullStudent, SolvedProblem } from "../types";
+import { ProfileDetails, FullStudent, SolvedProblem, CFContest } from "../types";
 import { getRankStyles } from "./Leaderboard";
+import { cfGetUserInfo, cfGetUserStatus, cfGetUserRating } from "../cfApi";
 import { 
   User, 
   ExternalLink, 
@@ -21,6 +22,257 @@ import {
   TrendingUp
 } from "lucide-react";
 
+interface ContestRatingChartProps {
+  contests: CFContest[];
+}
+
+function ContestRatingChart({ contests }: ContestRatingChartProps) {
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+
+  if (!contests || contests.length === 0) return null;
+
+  const width = 600;
+  const height = 220;
+  const paddingLeft = 45;
+  const paddingRight = 15;
+  const paddingTop = 20;
+  const paddingBottom = 30;
+
+  // We limit the trend line to the last 20 contest sessions to remain clean and beautifully spaced
+  const chartData = contests.slice(-20);
+
+  const ratings = chartData.map(c => c.newRating);
+  const oldRatings = chartData.map(c => c.oldRating);
+  const minRating = Math.min(...ratings, ...oldRatings);
+  const maxRating = Math.max(...ratings, ...oldRatings);
+  
+  // High-contrast margin bounds for custom dynamic dynamic scale
+  const rMin = Math.max(0, minRating - 80);
+  const rMax = maxRating + 80;
+  const rRange = rMax - rMin || 1;
+
+  const points = chartData.map((c, idx) => {
+    const x = paddingLeft + (idx / (chartData.length - 1 || 1)) * (width - paddingLeft - paddingRight);
+    const y = height - paddingBottom - ((c.newRating - rMin) / rRange) * (height - paddingTop - paddingBottom);
+    return { x, y, contest: c, idx };
+  });
+
+  // Calculate 3 clean horizontal grid divisions
+  const gridLinesCount = 3;
+  const gridLines = Array.from({ length: gridLinesCount }).map((_, i) => {
+    const ratingVal = Math.round(rMin + (i * rRange) / (gridLinesCount - 1));
+    const y = height - paddingBottom - ((ratingVal - rMin) / rRange) * (height - paddingTop - paddingBottom);
+    return { ratingVal, y };
+  });
+
+  // Smooth standard SVG linear path generator
+  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ");
+  const areaPath = points.length > 0 
+    ? `${linePath} L ${points[points.length - 1].x.toFixed(1)} ${(height - paddingBottom).toFixed(1)} L ${points[0].x.toFixed(1)} ${(height - paddingBottom).toFixed(1)} Z`
+    : "";
+
+  // Set default view active state to latest contest point
+  const activeIdx = hoveredIdx !== null ? hoveredIdx : (chartData.length - 1);
+  const activePoint = points[activeIdx];
+  const activeContest = activePoint?.contest;
+
+  const activeDelta = activeContest ? activeContest.newRating - activeContest.oldRating : 0;
+  const activeIsPositive = activeDelta >= 0;
+  const activeShiftColor = activeIsPositive ? "text-[#00ff87]" : "text-red-400";
+  const activeShiftSign = activeIsPositive ? "+" : "";
+  const activeRankStyles = activeContest ? getRankStyles(activeContest.newRating) : getRankStyles(0);
+
+  return (
+    <div className="bg-cyber-dark/40 border border-gray-950 rounded-xl p-4 font-mono mb-5 space-y-4">
+      {/* Dynamic Header Metrics Context Panel */}
+      {activeContest && (
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center border-b border-gray-900/60 pb-3" id="rating-focus-stats">
+          <div className="md:col-span-7 space-y-0.5">
+            <span className="text-[9px] text-gray-500 uppercase tracking-widest block font-bold">
+              {hoveredIdx !== null ? "⚡ FOCUS POINT METRIC" : "🏆 LATEST CONTEST SCORE"}
+            </span>
+            <span className="text-white text-xs font-semibold block truncate" title={activeContest.contestName}>
+              {activeContest.contestName}
+            </span>
+            <span className="text-[10px] text-gray-500">
+              Resolved: {new Date(activeContest.ratingUpdateTimeSeconds * 1000).toLocaleDateString()} • Rank: #{activeContest.rank}
+            </span>
+          </div>
+          <div className="md:col-span-5 flex items-center justify-end gap-3.5 font-mono">
+            <div className="text-right">
+              <span className="text-[9px] text-gray-500 block">DELTA</span>
+              <span className={`text-xs font-extrabold ${activeShiftColor}`}>
+                {activeShiftSign}{activeDelta}
+              </span>
+            </div>
+            <div className="h-7 w-px bg-gray-900" />
+            <div className="text-right font-bold">
+              <span className="text-[9px] text-gray-500 block font-normal">RATING</span>
+              <span className={`text-xs ${activeRankStyles.textColor}`} style={{ textShadow: activeRankStyles.textShadow }}>
+                {activeContest.newRating}
+              </span>
+            </div>
+            <div className="h-7 w-px bg-gray-900" />
+            <div className="text-right">
+              <span className="text-[9px] text-gray-500 block">CF TIER</span>
+              <span className={`text-[8px] font-extrabold uppercase px-1.5 py-0.5 rounded leading-none ${activeRankStyles.textColor} ${activeRankStyles.bgClass} border border-current/10 whitespace-nowrap`}>
+                {activeRankStyles.rankName}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SVG Container Stage */}
+      <div className="relative w-full overflow-hidden" style={{ aspectRatio: "600/220" }} id="rating-trend-container">
+        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full select-none overflow-visible">
+          <defs>
+            <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#a855f7" stopOpacity="0.25" />
+              <stop offset="50%" stopColor="#6366f1" stopOpacity="0.08" />
+              <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+
+          {/* Grid Axes Lines */}
+          {gridLines.map((gl, i) => (
+            <g key={i}>
+              <line
+                x1={paddingLeft}
+                y1={gl.y}
+                x2={width - paddingRight}
+                y2={gl.y}
+                className="stroke-gray-900/40 dark:stroke-gray-200/20"
+                strokeWidth={1}
+                strokeDasharray="3 3"
+              />
+              <text
+                x={paddingLeft - 8}
+                y={gl.y + 3}
+                className="fill-gray-500 font-mono text-[9px] font-semibold text-right"
+                textAnchor="end"
+              >
+                {gl.ratingVal}
+              </text>
+            </g>
+          ))}
+
+          {/* Area Gradient Graph Path */}
+          {areaPath && (
+            <path
+              d={areaPath}
+              fill="url(#chartGradient)"
+            />
+          )}
+
+          {/* Stroke line path */}
+          {linePath && (
+            <>
+              {/* Stroke halo glow */}
+              <path
+                d={linePath}
+                fill="none"
+                stroke="#a855f7"
+                strokeWidth={3}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.25}
+                className="blur-[2px]"
+              />
+              {/* Solid path line */}
+              <path
+                d={linePath}
+                fill="none"
+                stroke="#a855f7"
+                className="stroke-purple-500"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </>
+          )}
+
+          {/* Highlight indicator vertical rail bar */}
+          {activePoint && (
+            <line
+              x1={activePoint.x}
+              y1={paddingTop}
+              x2={activePoint.x}
+              y2={height - paddingBottom}
+              stroke="#a855f7"
+              strokeWidth={1}
+              strokeDasharray="2 2"
+              opacity={0.6}
+            />
+          )}
+
+          {/* Highlight and plot vertices dots */}
+          {points.map((p, i) => {
+            const isActive = i === activeIdx;
+            
+            // Re-map dot color dynamically mapped to Codeforces tiering
+            let dotColor = "#cbd5e1";
+            if (p.contest.newRating >= 2300) dotColor = "#fb923c"; // Orange
+            else if (p.contest.newRating >= 2100) dotColor = "#e879f9"; // Fuchsia
+            else if (p.contest.newRating >= 1900) dotColor = "#60a5fa"; // Expert blue
+            else if (p.contest.newRating >= 1600) dotColor = "#22d3ee"; // Specialist cyan
+            else if (p.contest.newRating >= 1200) dotColor = "#00ff87"; // Pupil green
+
+            return (
+              <g key={i}>
+                {isActive && (
+                  <circle
+                    cx={p.x}
+                    cy={p.y}
+                    r={6.5}
+                    fill={dotColor}
+                    opacity={0.3}
+                    className="animate-ping"
+                  />
+                )}
+                <circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={isActive ? 4.5 : 2.5}
+                  fill={dotColor}
+                  stroke="#161b22"
+                  strokeWidth={isActive ? 1.5 : 1}
+                  className="transition-all duration-150"
+                  style={{ filter: isActive ? `drop-shadow(0 0 3px ${dotColor})` : "none" }}
+                />
+              </g>
+            );
+          })}
+
+          {/* Hover interactive detection columns */}
+          {points.map((p, i) => {
+            const colWidth = (width - paddingLeft - paddingRight) / (points.length || 1);
+            return (
+              <rect
+                key={i}
+                x={p.x - colWidth / 2}
+                y={0}
+                width={colWidth}
+                height={height - paddingBottom}
+                fill="transparent"
+                onMouseEnter={() => setHoveredIdx(p.idx)}
+                onMouseLeave={() => setHoveredIdx(null)}
+                className="cursor-crosshair"
+              />
+            );
+          })}
+        </svg>
+
+        {/* Dynamic Interactive guide label */}
+        <div className="absolute bottom-1 right-2 flex items-center gap-2.5 text-[8px] text-gray-500 bg-cyber-panel/90 border border-gray-900/60 px-2 py-0.5 rounded font-mono select-none">
+          <span className="w-1.5 h-1.5 rounded-full bg-purple-500" />
+          Rating Curve Progress (Hover timeline points)
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface UserProfileProps {
   student: FullStudent;
   onBack: () => void;
@@ -33,6 +285,7 @@ export default function UserProfile({ student, onBack }: UserProfileProps) {
   const [problemSearch, setProblemSearch] = useState("");
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
+  const [showAllContests, setShowAllContests] = useState(false);
   const problemsPerPage = 10;
 
   const fetchProfileDetails = async () => {
@@ -44,7 +297,106 @@ export default function UserProfile({ student, onBack }: UserProfileProps) {
         throw new Error("Failed to fetch Codeforces profile stats.");
       }
       const data = await response.json();
-      setProfile(data);
+      
+      let finalProfile = data;
+      const isStaleOrOffline = !data.info || data.info.offline || data.info.error || (data.submissions && data.submissions.offline);
+
+      if (isStaleOrOffline) {
+        console.log(`[Client Fallback Healing] Server fetched profile was rate-limited or offline. Initiating direct browser Codeforces JSONP query for user "${student.handle}"...`);
+        try {
+          // Fetch user info via JSONP
+          let freshInfo = data.info;
+          try {
+            const infoResult = await cfGetUserInfo([student.handle]);
+            if (infoResult && infoResult[0]) {
+              freshInfo = infoResult[0];
+            }
+          } catch (infoErr) {
+            console.warn("[Client JSONP user info fetch failed]:", infoErr);
+          }
+
+          // Fetch submissions via JSONP
+          let freshSubs = data.submissions;
+          try {
+            const submissionsResult = await cfGetUserStatus(student.handle);
+            if (Array.isArray(submissionsResult)) {
+              const solvedProblemsMap = new Map();
+              submissionsResult.forEach((sub: any) => {
+                if (sub.verdict === "OK" && sub.problem) {
+                  const key = `${sub.problem.contestId}-${sub.problem.index}`;
+                  if (!solvedProblemsMap.has(key)) {
+                    solvedProblemsMap.set(key, {
+                      contestId: sub.problem.contestId,
+                      index: sub.problem.index,
+                      name: sub.problem.name,
+                      rating: sub.problem.rating || 0,
+                      tags: sub.problem.tags || [],
+                      solvedAt: sub.creationTimeSeconds * 1000
+                    });
+                  }
+                }
+              });
+
+              const solvedList = Array.from(solvedProblemsMap.values());
+              const totalSolved = solvedList.length;
+              const ratingDistribution: Record<number, number> = {};
+              const tagDistribution: Record<string, number> = {};
+
+              solvedList.forEach((prob: any) => {
+                if (prob.rating) {
+                  ratingDistribution[prob.rating] = (ratingDistribution[prob.rating] || 0) + 1;
+                }
+                prob.tags.forEach((tag: string) => {
+                  tagDistribution[tag] = (tagDistribution[tag] || 0) + 1;
+                });
+              });
+
+              freshSubs = {
+                totalSolved,
+                solvedProblems: solvedList,
+                ratingDistribution,
+                tagDistribution,
+                lastUpdated: Date.now()
+              };
+            }
+          } catch (subsErr) {
+            console.warn("[Client JSONP user status fetch failed]:", subsErr);
+          }
+
+          // Fetch contests rating history via JSONP
+          let freshContests = data.contests;
+          try {
+            const ratingHistoryResult = await cfGetUserRating(student.handle);
+            if (Array.isArray(ratingHistoryResult)) {
+              freshContests = ratingHistoryResult;
+            }
+          } catch (ratingErr) {
+            console.warn("[Client JSONP user rating fetch failed]:", ratingErr);
+          }
+
+          finalProfile = {
+            info: freshInfo,
+            submissions: freshSubs,
+            contests: freshContests
+          };
+
+          // Background sync updated user info back to server database cache
+          if (freshInfo && !freshInfo.offline && !freshInfo.error) {
+            fetch("/api/cf/save-cache", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                updates: [{ handle: student.handle, cfData: freshInfo }]
+              })
+            }).catch(e => console.warn("[Background Sync Cached Profile Failed]", e));
+          }
+
+        } catch (fallbackErr) {
+          console.warn("[Client Fallback Healing Failed] Codeforces API could not be queried directly:", fallbackErr);
+        }
+      }
+
+      setProfile(finalProfile);
     } catch (err: any) {
       setError(err.message || "An error occurred while loading profile.");
     } finally {
@@ -196,10 +548,15 @@ export default function UserProfile({ student, onBack }: UserProfileProps) {
                 </div>
 
                 {/* Rank Badge */}
-                <div className="mt-3.5">
+                <div className="mt-3.5 flex flex-col items-center gap-2">
                   <span className={`px-3 py-1.5 text-xs font-bold font-mono rounded-md bg-cyber-dark border tracking-widest uppercase inline-block ${rankMeta.textColor} ${rankMeta.bgClass}`}>
                     {rankMeta.rankName}
                   </span>
+                  {(profile?.info?.isCachedFallback || profile?.info?.offline) && (
+                    <span className="px-2 py-0.5 text-[9px] bg-amber-500/10 border border-amber-500/30 text-amber-400 font-mono rounded uppercase tracking-widest font-extrabold animate-pulse">
+                      Serving Cached Backup
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -383,6 +740,92 @@ export default function UserProfile({ student, onBack }: UserProfileProps) {
                   </div>
                   {/* Spacing for vertical text */}
                   <div className="h-10"></div>
+                </div>
+              )}
+            </div>
+
+            {/* Codeforces Contest Tracker */}
+            <div className="bg-cyber-panel rounded-xl border border-gray-900 p-5 md:p-6 shadow-indigo-500/10" id="cf-contest-tracker">
+              <h4 className="text-sm font-bold tracking-widest text-purple-400 uppercase flex items-center gap-2 mb-4 font-mono">
+                <TrendingUp className="w-4 h-4 text-purple-400" />
+                Codeforces Contest Performance Tracker
+              </h4>
+
+              {!profile?.contests || profile.contests.length === 0 ? (
+                <div className="py-8 text-center text-gray-500 font-mono text-xs border border-dashed border-gray-800 rounded-lg">
+                  No rated Codeforces contest participation records detected for this student.
+                </div>
+              ) : (
+                <div className="font-mono space-y-3">
+                  {/* Embedded high-fidelity interactive SVG rating trend line graph */}
+                  <ContestRatingChart contests={profile.contests} />
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse font-mono text-xs" id="contests-table">
+                      <thead>
+                        <tr className="border-b border-gray-900 text-[10px] text-purple-400 uppercase font-bold tracking-wider">
+                          <th className="py-2.5 px-3">Contest Detail</th>
+                          <th className="py-2.5 px-3 text-center w-20">Rank</th>
+                          <th className="py-2.5 px-3 text-center w-24">Rating Shift</th>
+                          <th className="py-2.5 px-3 text-center w-36">New Rating</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-900/40">
+                        {profile.contests
+                          .slice()
+                          .reverse()
+                          .slice(0, showAllContests ? undefined : 5)
+                          .map((contest) => {
+                            const delta = contest.newRating - contest.oldRating;
+                            const isPositive = delta >= 0;
+                            const shiftColor = isPositive ? "text-[#00ff87]" : "text-red-400";
+                            const shiftSign = isPositive ? "+" : "";
+                            const currentRankStyles = getRankStyles(contest.newRating);
+
+                            return (
+                              <tr key={contest.contestId} className="hover:bg-cyber-dark/30 transition-colors">
+                                <td className="py-3 px-3">
+                                  <a
+                                    href={`https://codeforces.com/contest/${contest.contestId}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-white hover:text-cyber-cyan font-semibold block max-w-sm truncate transition-colors"
+                                    title={contest.contestName}
+                                  >
+                                    {contest.contestName}
+                                  </a>
+                                  <span className="text-[10px] text-gray-500">
+                                    {new Date(contest.ratingUpdateTimeSeconds * 1000).toLocaleDateString()}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-3 text-center font-bold text-gray-300">
+                                  #{contest.rank}
+                                </td>
+                                <td className={`py-3 px-3 text-center font-bold font-mono ${shiftColor}`}>
+                                  {shiftSign}{delta}
+                                </td>
+                                <td className="py-3 px-3 text-center font-semibold text-white/95">
+                                  <span className="text-gray-500 text-[10px] font-normal mr-1.5">{contest.oldRating} ➔</span>
+                                  <span className={currentRankStyles.textColor}>{contest.newRating}</span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {profile.contests.length > 5 && (
+                    <div className="text-center pt-3 border-t border-gray-900">
+                      <button
+                        onClick={() => setShowAllContests(!showAllContests)}
+                        className="text-xs text-cyber-cyan hover:text-[#00ff87] font-bold tracking-wider uppercase transition-colors cursor-pointer"
+                        id="toggle-all-contests-btn"
+                      >
+                        {showAllContests ? "[ SHOW FEWER CONTESTS ]" : `[ SHOW ALL ${profile.contests.length} CONTEST PARTICIPATIONS ]`}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

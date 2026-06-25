@@ -528,14 +528,17 @@ app.post("/api/users", async (req, res) => {
       return res.status(400).json({ error: `Registration number "${regNo}" is already registered.` });
     }
 
-        // Save
-    const newStudent = {
+    // Save
+    const newStudent: any = {
       name: name.trim(),
       handle: verifiedHandle,
       regNo: regNo.trim(),
-      addedAt: new Date().toISOString(),
-      cfData: cfUserInfo || undefined
+      addedAt: new Date().toISOString()
     };
+
+    if (cfUserInfo) {
+      newStudent.cfData = cfUserInfo;
+    }
 
     try {
       await setDoc(studentDocRef, newStudent);

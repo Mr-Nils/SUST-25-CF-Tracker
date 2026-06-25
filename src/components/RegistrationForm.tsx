@@ -74,7 +74,17 @@ export default function RegistrationForm({ onRegisterSuccess }: RegistrationForm
           <div className="mb-6 p-4 rounded-lg bg-red-950/40 border border-red-500/30 text-red-300 text-sm flex gap-3 items-start font-mono">
             <ShieldAlert className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
             <div>
-              <p className="font-semibold uppercase tracking-tight text-red-400">Verification Protocol Failed</p>
+              <p className="font-semibold uppercase tracking-tight text-red-400">
+                {error.toLowerCase().includes("already registered") || error.toLowerCase().includes("duplicate")
+                  ? "Registration Duplicate"
+                  : error.toLowerCase().includes("invalid characters") || error.toLowerCase().includes("criteria") || error.toLowerCase().includes("parse")
+                  ? "Invalid Handle Format"
+                  : error.toLowerCase().includes("required") || error.toLowerCase().includes("fill")
+                  ? "Missing Fields"
+                  : error.toLowerCase().includes("not found") || error.toLowerCase().includes("exist")
+                  ? "Codeforces Handle Not Found"
+                  : "Verification Protocol Failed"}
+              </p>
               <p className="text-red-200/80 mt-1">{error}</p>
             </div>
           </div>

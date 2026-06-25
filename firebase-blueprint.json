@@ -21,6 +21,15 @@
           "type": "string",
           "format": "date-time",
           "description": "Timestamp when this record was registered"
+        },
+        "cfData": {
+          "type": "object",
+          "description": "Optional cached Codeforces user information"
+        },
+        "lastCfUpdate": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional timestamp of the last successful Codeforces API status sync"
         }
       },
       "required": ["name", "handle", "regNo", "addedAt"]

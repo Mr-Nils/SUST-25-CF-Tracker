@@ -122,7 +122,7 @@ interface LeaderboardProps {
   isCreator: boolean;
 }
 
-type SortField = "rank" | "name" | "rating" | "regNo";
+type SortField = "rank" | "name" | "rating" | "regNo" | "peakRating";
 type SortOrder = "asc" | "desc";
 
 export default function Leaderboard({ students, isLoading, onSelectStudent, onDeleteStudent, isCreator }: LeaderboardProps) {
@@ -167,6 +167,9 @@ export default function Leaderboard({ students, isLoading, onSelectStudent, onDe
     } else if (sortField === "rank") {
       factorA = a.cfData?.rating || 0; // Rank corresponds to rating
       factorB = b.cfData?.rating || 0;
+    } else if (sortField === "peakRating") {
+      factorA = a.cfData?.maxRating || 0;
+      factorB = b.cfData?.maxRating || 0;
     }
 
     if (factorA < factorB) return sortOrder === "asc" ? -1 : 1;
@@ -239,6 +242,12 @@ export default function Leaderboard({ students, isLoading, onSelectStudent, onDe
                 <th className="py-3.5 px-4 cursor-pointer hover:text-white transition-colors text-center" onClick={() => handleSort("rating")}>
                   <div className="flex items-center justify-center gap-1.5">
                     CF Rating
+                    <ArrowUpDown className="w-3.5 h-3.5" />
+                  </div>
+                </th>
+                <th className="py-3.5 px-4 cursor-pointer hover:text-white transition-colors text-center hidden sm:table-cell" onClick={() => handleSort("peakRating")}>
+                  <div className="flex items-center justify-center gap-1.5">
+                    Peak Rating
                     <ArrowUpDown className="w-3.5 h-3.5" />
                   </div>
                 </th>
@@ -323,16 +332,20 @@ export default function Leaderboard({ students, isLoading, onSelectStudent, onDe
 
                     {/* Codeforces rating */}
                     <td className="py-3 px-4 text-center">
-                      <div className="flex flex-col items-center">
-                        <span className={`text-base font-extrabold tracking-wide ${rankStyles.textColor}`} style={{ textShadow: rankStyles.textShadow }}>
-                          {student.cfData?.rating || "—"}
+                      <span className={`text-base font-extrabold tracking-wide ${rankStyles.textColor}`} style={{ textShadow: rankStyles.textShadow }}>
+                        {student.cfData?.rating || "—"}
+                      </span>
+                    </td>
+
+                    {/* Peak Rating */}
+                    <td className="py-3 px-4 text-center hidden sm:table-cell">
+                      {student.cfData?.maxRating ? (
+                        <span className="text-sm font-extrabold text-cyber-pink">
+                          {student.cfData.maxRating}
                         </span>
-                        {student.cfData?.maxRating && (
-                          <span className="text-[10px] text-gray-600 font-medium">
-                            peak: {student.cfData.maxRating}
-                          </span>
-                        )}
-                      </div>
+                      ) : (
+                        <span className="text-gray-600">—</span>
+                      )}
                     </td>
 
                     {/* Rank Class badges */}
